@@ -1,4 +1,4 @@
-// Scratch experiments for the notes in `what-nodejs-is.md`.
+// Scratch experiments for the notes in `what-is-nodejs.md`.
 // Every block is commented out so the file can hold several examples at once.
 
 /*
