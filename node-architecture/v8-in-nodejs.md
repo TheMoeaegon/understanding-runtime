@@ -13,11 +13,11 @@ The V8 engine owns JavaScript execution, garbage collection, object layout, and 
 >
 > If `/users` gets called thousands of times, the code inside that route is **hot code**. So you can think of **hot code = code on a busy path that runs again and again.**
 
-To generate fast machine code, V8 relies on stable object shapes, i.e. hidden templates it creates behind the scenes to track an object's layout. Because JavaScript is dynamically typed, objects don't have fixed schemas. V8 solves this by tracking the order and names of properties you add. When you create multiple objects that have the exact same keys assigned in the exact same sequence, they share a "stable shape." This predictability allows V8's inline caches to bypass expensive lookups and access memory locations almost instantly.
+To generate fast machine code, V8 relies on stable object shapes, that is, hidden templates it creates behind the scenes to track an object's layout. Because JavaScript is dynamically typed, objects don't have fixed schemas. V8 solves this by tracking the order and names of properties you add. When you create multiple objects that have the exact same keys assigned in the exact same sequence, they share a "stable shape." This predictability allows V8's inline caches to bypass expensive lookups and access memory locations almost instantly.
 
 Also, passing mixed shapes into a function, changing array element kinds, using the `delete` keyword, manipulating the `arguments` object, or introducing repeated type changes disrupts this stability. These actions shatter V8's assumptions, forcing execution back down into lower, slower runtime tiers. While this process (known as deoptimization) preserves the correctness of your code, a hot path pays a massive performance penalty for losing its optimized code.
 
-This chapter covers exactly that — how V8 compiles JavaScript, how maps and inline caches feed the JIT compiler, how memory layout affects common operations, and which coding patterns keep your programs out of repeated deoptimization loops.
+This chapter covers exactly that: how V8 compiles JavaScript, how maps and inline caches feed the JIT compiler, how memory layout affects common operations, and which coding patterns keep your programs out of repeated deoptimization loops.
 
 ## How V8 Runs JavaScript in Node.js
 
@@ -76,3 +76,38 @@ The mistake was treating a hot-path JavaScript object as something whose structu
 The engine had made a set of assumptions about the original structure of the config object. This optional property broke those assumptions, polluted the inline caches, and forced V8 to discard its optimized code path.
 
 ## Ignition, Sparkplug, Maglev, and TurboFan
+
+Thinking of V8 as a basic line-by-line interpreter can lead to the wrong conclusions about performance. Instead, modern V8 keeps startup costs exceptionally low. It begins by observing how your code actually behaves at runtime, investing extra compilation time only after a function proves it runs frequently enough to deserve optimization.
+
+This process always starts with parsing. V8 scans your raw source text to generate tokens, structures those tokens into an Abstract Syntax Tree (AST), and then translates that tree into Ignition bytecode — which we talked about earlier. This bytecode serves as V8's compact instruction stream, running the code inside the interpreter while feeding behavioral data to the later compiler tiers.
+
+![JavaScript source moving through parser, AST, Ignition bytecode, and execution with feedback](media/source-to-bytecode.svg)
+
+*Figure 1.2 — Source becomes bytecode before tiering decisions count.*
+
+While Ignition executes this bytecode, it populates tracking slots known as feedback vectors. These vectors record the real-world behavior of everyday runtime operations. Instead of just running the code, the engine takes detailed notes on how functions are called, how math operations behave, how arrays are accessed, and how object maps shift.
+
+For example, when V8 encounters a lookup like `obj.x`, the recorded feedback goes far deeper than just saving the property name `x`. The engine tracks the specific internal map of `obj`, the exact memory offset used to locate `x`, and whether subsequent executions continue to match that identical layout.
+
+Once that feedback is available, hot code can move upward:
+
+![V8 tiering path from Ignition to Sparkplug, Maglev, and TurboFan](media/tiering-pipeline.svg)
+
+*Figure 1.3 — Current Node/V8 builds commonly expose Ignition, Sparkplug, Maglev, and TurboFan. Exact thresholds are V8 heuristics rather than a Node API.*
+
+Sparkplug is V8's fast baseline compiler. It skips speculative optimizations entirely and compiles Ignition bytecode directly into machine code. The primary goal here is early throughput: it removes the interpreter's dispatch overhead without forcing the engine to wait for a heavy, time-consuming optimization pass.
+
+Maglev sits right between Sparkplug and TurboFan as a mid-tier optimizer. It builds a simplified control-flow graph and uses gathered runtime feedback to specialize common operations. This allows it to compile code much faster than the peak optimizer while still delivering a solid performance boost.
+
+TurboFan represents the peak optimizing tier. It combines bytecode with runtime feedback to generate highly specialized machine code for the absolute hottest paths. For instance, if feedback shows that a specific property lookup has repeatedly encountered the same object map, TurboFan generates code that guards that map and uses a fast, fixed-offset memory load instead of running a full, expensive property lookup.
+
+> [!IMPORTANT]
+> The most important takeaway is the feedback-driven pipeline itself. V8 takes hot JavaScript, converts it into internal representations, specializes it based on real-world behavior, and throws that optimized code away the moment its assumptions are broken.
+
+To keep your application responsive, V8 can compile this optimized code concurrently in the background, and Node exposes controls for these concurrent systems through `node --v8-options`. However, this tiering process isn't free: gathering feedback, running guard checks, managing internal bookkeeping, installing optimized code, and recovering from deoptimizations all introduce a real runtime cost.
+
+On-Stack Replacement (OSR) handles functions that become hot while they are actively running. For example, a massive loop might start executing in the slow Ignition interpreter, cross an optimization threshold before the function actually finishes, and hot-swap execution over to optimized machine code mid-stream.
+
+At the end, optimized machine code is fast because it is strictly conditional. It is tailored precisely around the specific maps, element kinds, and data types that V8 has already observed. The moment a future execution violates those exact assumptions, deoptimization triggers and throws the execution back to a lower tier while reconstructing enough internal state to ensure your JavaScript still runs perfectly.
+
+## Hidden Classes and Object Shapes
