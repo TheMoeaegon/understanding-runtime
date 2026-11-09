@@ -81,7 +81,7 @@ Thinking of V8 as a basic line-by-line interpreter can lead to the wrong conclus
 
 This process always starts with parsing. V8 scans your raw source text to generate tokens, structures those tokens into an Abstract Syntax Tree (AST), and then translates that tree into Ignition bytecode — which we talked about earlier. This bytecode serves as V8's compact instruction stream, running the code inside the interpreter while feeding behavioral data to the later compiler tiers.
 
-![JavaScript source moving through parser, AST, Ignition bytecode, and execution with feedback](media/source-to-bytecode.svg)
+<img src="media/source-to-bytecode.svg" alt="JavaScript source moving through parser, AST, Ignition bytecode, and execution with feedback" width="300" />
 
 *Figure 1.2 — Source becomes bytecode before tiering decisions count.*
 
