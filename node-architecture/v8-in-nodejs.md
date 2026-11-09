@@ -91,7 +91,7 @@ For example, when V8 encounters a lookup like `obj.x`, the recorded feedback goe
 
 Once that feedback is available, hot code can move upward:
 
-![V8 tiering path from Ignition to Sparkplug, Maglev, and TurboFan](media/tiering-pipeline.svg)
+<img src="media/tiering-pipeline.svg" alt="V8 tiering path from Ignition to Sparkplug, Maglev, and TurboFan" width="398" />
 
 *Figure 1.3 — Current Node/V8 builds commonly expose Ignition, Sparkplug, Maglev, and TurboFan. Exact thresholds are V8 heuristics rather than a Node API.*
 
@@ -111,3 +111,105 @@ On-Stack Replacement (OSR) handles functions that become hot while they are acti
 At the end, optimized machine code is fast because it is strictly conditional. It is tailored precisely around the specific maps, element kinds, and data types that V8 has already observed. The moment a future execution violates those exact assumptions, deoptimization triggers and throws the execution back to a lower tier while reconstructing enough internal state to ensure your JavaScript still runs perfectly.
 
 ## Hidden Classes and Object Shapes
+
+Hidden classes (also called shapes, or maps in V8's source code) are the mechanism V8 uses to make property access on ordinary JavaScript objects fast. Many object-property optimizations rest on that mechanism.
+
+Start with the language model, then look underneath it.
+
+### Maps, Not Just Dictionaries
+
+At the language level, JavaScript objects behave as flexible key-value dictionaries. Internally, though, V8 avoids slow dictionary lookups by tracking object layouts with structures it calls **maps**.
+
+Whenever you create an object, the engine assigns it a hidden class behind the scenes. This hidden class stores important metadata about the object's shape, including which properties exist, the exact order in which they were added, and where their values live in memory.
+
+The following experiment shows this map transition behavior in action:
+
+```js
+// Run from node-architecture/:
+// node --allow-natives-syntax examples/hidden-classes-demo.js
+const obj1 = {};
+const obj2 = {};
+console.log(%HaveSameMap(obj1, obj2)); // true
+
+obj1.x = 1;
+console.log(%HaveSameMap(obj1, obj2)); // false
+
+obj2.x = 5;
+console.log(%HaveSameMap(obj1, obj2)); // true
+```
+
+At first, the two empty objects share the exact same internal map. The moment you add the property `x` to the first object, V8 shifts it to a brand-new map. Once you add that identical property to the second object, it follows the same transition path and safely reunites with the first object under a shared map.
+
+### Transition Trees
+
+To maximize efficiency, V8 creates a shared transition tree that allows multiple objects to reuse the same map pathway as long as they follow the exact same steps.
+
+Imagine you create a blank object like `const p1 = {}`. V8 assigns it a base hidden class, which we can call `C0`. The moment your code executes `p1.x = 5`, V8 checks whether a rule for adding the property `x` already branches off from `C0`. If it doesn't find one, the engine generates a brand-new map called `C1` and logs a transition: `C0 + 'x' => C1`. This new map records exactly where the value for `x` is located in memory.
+
+When you add another property with `p1.y = 10`, the process repeats by creating another branch: `C1 + 'y' => C2`. If you later create a completely separate object and add `x` followed by `y`, that second object will step along this exact pre-built path and finish at `C2`. Because both objects now share the identical map, V8's optimizer can safely treat their underlying memory layouts as the same guarded structure.
+
+The exact sequence of your assignments defines this path. If a different object adds `y` first and then `x`, V8 branches down an entirely separate transition chain. Even though both objects eventually end up with the exact same keys, their internal memory offsets are different, resulting in completely separate maps.
+
+<img src="media/hidden-class-transition-order.svg" alt="Hidden-class transition paths showing how different property addition orders produce different maps" width="393" />
+
+*Figure 1.4 — Adding the same properties in different orders creates different map transition paths.*
+
+![Shared construction paths and an inline cache checking a known map](media/hidden-class-inline-cache.png)
+
+*Figure 1.5 — Shared construction paths let objects reach the same map; a stable map gives an inline cache a guarded path to a known property slot.*
+
+### The Config Object Failure Mode
+
+The performance issue we discussed earlier typically happens in code structured like this:
+
+```js
+function createConfig(base, userOverrides, requestParams) {
+  const config = {};
+  Object.assign(config, base);
+  Object.assign(config, userOverrides);
+
+  if (requestParams.useNewFeature) {
+    config.optionalFeature = true;
+  }
+
+  return config;
+}
+```
+
+Because the properties inside `base` and `userOverrides` can arrive in a random order, and because `optionalFeature` is only appended under certain conditions, this function constantly creates different internal maps for objects that are logically identical.
+
+When V8's optimized machine code later tries to read these configuration objects, it encounters too many structural variations. This causes the property-access sites to become polymorphic or megamorphic, which means the engine is forced to track multiple shifting layouts instead of a single, predictable shape. So, the compiler loses its stable memory offset and can no longer look up your data instantly.
+
+The hidden-class split follows this visual path:
+
+<img src="media/conditional-property-map-branch.svg" alt="Conditional property assignment splitting one hot object path into two final maps" width="517" />
+
+*Figure 1.6 — A conditional property assignment splits one hot object path into two final maps.*
+
+To fix this for a hot configuration object with known fields, you should declare the full object layout upfront. Instead of appending new properties down the line, initialize everything first and update those existing fields later:
+
+```js
+function createConfigV2(base, userOverrides, requestParams) {
+  const config = {
+    settingA: base.settingA ?? null,
+    settingB: base.settingB ?? null,
+    optionalFeature: false,
+  };
+
+  for (const [key, value] of Object.entries(userOverrides)) {
+    if (Object.hasOwn(config, key)) {
+      config[key] = value;
+    }
+  }
+
+  config.optionalFeature = Boolean(requestParams.useNewFeature);
+  return config;
+}
+```
+
+By creating a stable layout right from the start, almost every configuration object generated by this function can share the exact same internal map.
+
+The order in which you add properties decides whether V8 can keep a fast execution path. Enforce this fixed layout for hot data structures with a known set of keys. If you genuinely need a flexible container for dynamic or unpredictable keys, use a native JavaScript `Map` instead.
+
+> [!CAUTION]
+> Pre-initializing every property stabilizes object shapes but can occasionally consume extra memory if your objects are exceptionally large. Reserve this technique strictly for data structures sitting on your application's hottest paths. For general-purpose code, always prioritize standard readability and maintainability.

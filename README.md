@@ -27,6 +27,6 @@ From NodeBook's own introduction:
 
 | Path | What it covers |
 | --- | --- |
-| [`node-architecture/`](node-architecture/index.md) | What Node.js is, the parts of the runtime, and the engine that executes JavaScript |
+| [`node-architecture`](node-architecture/index.md) | What Node.js is, the parts of the runtime, and the engine that executes JavaScript |
 
 Each topic folder keeps its figures in a local `media/` directory and references them with descriptive names rather than `Pasted image ...` filenames.
